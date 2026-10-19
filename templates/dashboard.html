@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <h2>Status</h2>
+  <p>Guard: <strong>{{ "ON" if settings.get("guard.enabled") == "1" else "OFF" }}</strong>
+     &middot; Restore: <strong>{{ "APPROVAL-GATED" if settings.get("guard.restore_enabled") == "1" else "MONITOR-ONLY" }}</strong>
+     &middot; Watching <strong>{{ tracked_count }}</strong> files
+     &middot; Poll every {{ settings.get("guard.poll_interval_seconds") }}s</p>
+  <form method="post" action="{{ url_for('scan_now') }}"><button type="submit">Scan now</button></form>
+</section>
+
+{% if pending %}
+<section class="card">
+  <h2>Pending restores — needs your approval</h2>
+  <table>
+    <tr><th>When</th><th>Path</th><th>Baseline</th><th>Found</th><th>Diff</th><th></th></tr>
+    {% for p in pending %}
+    <tr>
+      <td>{{ p.detected_at }}</td>
+      <td class="mono">{{ p.path }}</td>
+      <td>{{ p.baseline_size }}B</td>
+      <td>{{ p.found_size }}B</td>
+      <td>{{ p.diff_snippet }}</td>
+      <td style="white-space:nowrap">
+        <form method="post" action="{{ url_for('approve_restore') }}" style="display:inline">
+          <input type="hidden" name="incident_id" value="{{ p.id }}">
+          <button type="submit">Approve restore</button>
+        </form>
+        <form method="post" action="{{ url_for('reject_restore') }}" style="display:inline">
+          <input type="hidden" name="incident_id" value="{{ p.id }}">
+          <button type="submit">Reject (keep current)</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>Recent incidents</h2>
+  {% if incidents %}
+  <table>
+    <tr><th>When</th><th>Path</th><th>Baseline</th><th>Found</th><th>Status</th><th>Diff</th><th>Detail</th></tr>
+    {% for i in incidents %}
+    <tr>
+      <td>{{ i.detected_at }}</td>
+      <td class="mono">{{ i.path }}</td>
+      <td>{{ i.baseline_size }}B</td>
+      <td>{{ i.found_size }}B</td>
+      <td>{{ i.status }}</td>
+      <td>{{ i.diff_snippet or "" }}</td>
+      <td>{{ i.detail }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="muted">No regressions logged yet.</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Tracked files — baselines</h2>
+  <table>
+    <tr><th>Path</th><th>Size</th><th>Last updated</th><th>Paused?</th><th></th></tr>
+    {% for b in baselines %}
+    <tr>
+      <td class="mono">{{ b.path }}</td>
+      <td>{{ b.size }}B</td>
+      <td>{{ b.updated_at }}</td>
+      <td>{{ pauses.get(b.path, "") }}</td>
+      <td>
+        {% if b.path in pauses %}
+        <form method="post" action="{{ url_for('unpause_file') }}" style="display:inline">
+          <input type="hidden" name="path" value="{{ b.path }}">
+          <button type="submit">Unpause</button>
+        </form>
+        {% else %}
+        <form method="post" action="{{ url_for('pause_file') }}" style="display:inline">
+          <input type="hidden" name="path" value="{{ b.path }}">
+          <select name="minutes">
+            <option value="10">10 min</option>
+            <option value="30">30 min</option>
+            <option value="60" selected>1 hr</option>
+            <option value="240">4 hr</option>
+            <option value="1440">24 hr</option>
+          </select>
+          <button type="submit">Pause</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</section>
+{% endblock %}

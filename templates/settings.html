@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <h2>Settings</h2>
+  <form method="post">
+    <label><input type="checkbox" name="enabled" {{ "checked" if settings.get("guard.enabled")=="1" }}> Guard enabled</label><br>
+    <label><input type="checkbox" name="restore_enabled" {{ "checked" if settings.get("guard.restore_enabled")=="1" }}> Queue restores for my approval on regression (Phase 2 — a regression shows up under "Pending restores" with a diff snippet; nothing is written to the file until you click Approve)</label><br>
+    <label>Poll interval (seconds): <input type="number" name="poll_interval_seconds" value="{{ settings.get('guard.poll_interval_seconds') }}" min="5"></label><br><br>
+    <button type="submit">Save</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Currently tracked ({{ tracked|length }})</h2>
+  <ul class="mono">
+    {% for p in tracked %}<li>{{ p }}</li>{% endfor %}
+  </ul>
+</section>
+{% endblock %}

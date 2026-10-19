@@ -1,0 +1,13 @@
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Local databases and runtime data
+*.db
+*.db-journal
+*.sqlite
+data/
+logs/
+*.log
