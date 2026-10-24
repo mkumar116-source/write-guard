@@ -22,6 +22,13 @@ added) — all guard activity is logged in this tool's own DB only.
 Smart Alerting Hub integration (added 2026-10-17): a regression also POSTs
 an alert to the hub (settings hub.*), and the poll loop watchdogs the hub's
 own /health endpoint — see send_hub_alert() / check_hub_health() below.
+
+Write-attribution cross-check (added 2026-10-24, RVG-14 — after incident 14
+on PROJECT_SETUP_TEMPLATE.md had no explanation): every regression is
+cross-checked against common/COMMON_WRITE_LOG.md (see PROJECT_SETUP_TEMPLATE
+§23) for a row on the same file within a few minutes of detection. A match
+means a legitimate, logged edit; no match is the stronger "unattributed"
+signal. See _find_attribution() / recheck_unattributed() below.
 """
 import os
 import threading
@@ -38,7 +45,9 @@ LOCK = threading.Lock()
 TRACKED_SUFFIXES = ("_CHANGE_LOG.md", "_BACKLOG.md", "_HANDOVER.md")
 CLASSIC_NAMES = ("CHANGE_LOG.md", "BACKLOG.md")
 SKIP_DIRS = {".git", "venv", ".venv", "__pycache__", "archive", "data", "static", "templates"}
-FIXED_EXTRA = ["common\\COMMON_REQUESTS.md", "common\\PROJECT_SETUP_TEMPLATE.md"]
+FIXED_EXTRA = ["common\\COMMON_REQUESTS.md", "common\\PROJECT_SETUP_TEMPLATE.md",
+               "common\\COMMON_WRITE_LOG.md"]
+WRITE_LOG_RELPATH = "common\\COMMON_WRITE_LOG.md"
 
 
 def discover_files():
@@ -139,10 +148,95 @@ def _diff_snippet(baseline, current, max_len=80):
     return "content differs at the byte level (no clear line boundary)"
 
 
-def _log_incident(path, baseline_size, found_size, detail, restored, status, diff_snippet):
-    db.execute("INSERT INTO revert_incidents (path, detected_at, baseline_size, found_size, detail, restored, "
-               "status, diff_snippet) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-               (path, _now_ist(), baseline_size, found_size, detail, int(restored), status, diff_snippet))
+def _log_incident(path, baseline_size, found_size, detail, restored, status, diff_snippet,
+                   attribution_status=None, attributed_note=None, detected_at=None):
+    detected_at = detected_at or _now_ist()
+    return db.execute(
+        "INSERT INTO revert_incidents (path, detected_at, baseline_size, found_size, detail, restored, "
+        "status, diff_snippet, attribution_status, attributed_note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (path, detected_at, baseline_size, found_size, detail, int(restored), status, diff_snippet,
+         attribution_status, attributed_note))
+
+
+# --- Write-attribution cross-check (added 2026-10-24, RVG-14) ---------------
+
+def _write_log_path():
+    root = db.get_setting("sources.root_folder", r"D:\Flask Tools")
+    return os.path.join(root, WRITE_LOG_RELPATH)
+
+
+def _normalize_path(p):
+    return os.path.normcase(os.path.normpath(p.strip()))
+
+
+def _parse_write_log_rows():
+    """Rows from COMMON_WRITE_LOG.md's table: | Date/Time (IST) | File |
+    Tool/Chat | Note |. Skips the header/separator lines and any malformed
+    row rather than raising — a hand-edited log shouldn't break scanning."""
+    content = _read(_write_log_path())
+    if not content:
+        return []
+    rows = []
+    for line in content.splitlines():
+        line = line.strip()
+        if not line.startswith("|") or set(line.replace("|", "").strip()) <= {"-", " "}:
+            continue
+        cols = [c.strip() for c in line.strip("|").split("|")]
+        if len(cols) < 3 or cols[0].lower().startswith("date"):
+            continue  # header row or malformed
+        try:
+            dt = datetime.strptime(cols[0], "%Y-%m-%d %H:%M")
+        except ValueError:
+            continue  # not a data row (or unexpected format) — skip, don't crash the scan
+        rows.append({
+            "dt": dt,
+            "file": cols[1],
+            "tool_chat": cols[2],
+            "note": cols[3] if len(cols) > 3 else "",
+        })
+    return rows
+
+
+def _find_attribution(path, detected_at_str, window_minutes):
+    """Nearest COMMON_WRITE_LOG.md row for this same path within
+    window_minutes of detected_at_str, or None if there isn't one (yet)."""
+    try:
+        detected_dt = datetime.strptime(detected_at_str, "%Y-%m-%d %H:%M:%S")
+    except (ValueError, TypeError):
+        return None
+    target = _normalize_path(path)
+    best, best_delta = None, None
+    for row in _parse_write_log_rows():
+        if _normalize_path(row["file"]) != target:
+            continue
+        delta = abs((row["dt"] - detected_dt).total_seconds()) / 60
+        if delta <= window_minutes and (best is None or delta < best_delta):
+            best, best_delta = row, delta
+    return best
+
+
+def recheck_unattributed():
+    """A chat usually writes the tracked file, then appends the
+    COMMON_WRITE_LOG.md row a little after — so an incident logged as
+    'unattributed' at detection time may still get explained once that row
+    lands. Re-checks each such incident on every poll until
+    attribution.recheck_grace_minutes elapses, then leaves it as the
+    stronger, permanent 'unattributed' signal."""
+    window_minutes = int(db.get_setting("attribution.match_window_minutes", "2") or 2)
+    grace_minutes = int(db.get_setting("attribution.recheck_grace_minutes", "5") or 5)
+    now = datetime.now()
+    for inc in db.query("SELECT * FROM revert_incidents WHERE attribution_status='unattributed'"):
+        try:
+            detected_dt = datetime.strptime(inc["detected_at"], "%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError):
+            continue
+        if (now - detected_dt).total_seconds() > grace_minutes * 60:
+            continue  # past grace period — stays unattributed
+        match = _find_attribution(inc["path"], inc["detected_at"], window_minutes)
+        if match:
+            note = f"{match['tool_chat']} — {match['note']}" if match["note"] else match["tool_chat"]
+            db.execute("UPDATE revert_incidents SET attribution_status='attributed', attributed_note=? "
+                       "WHERE id=?", (note, inc["id"]))
 
 
 # --- Smart Alerting Hub integration (added 2026-10-17) -----------------------
@@ -239,10 +333,22 @@ def check_one(path, restore_enabled):
             detail += " (queued for approval — nothing restored until approved on the dashboard)"
         else:
             status = "logged"
-        _log_incident(path, baseline_size, len(current), detail, False, status, snippet)
+        detected_at = _now_ist()
+        window_minutes = int(db.get_setting("attribution.match_window_minutes", "2") or 2)
+        match = _find_attribution(path, detected_at, window_minutes)
+        if match:
+            attribution_status = "attributed"
+            attributed_note = f"{match['tool_chat']} — {match['note']}" if match["note"] else match["tool_chat"]
+        else:
+            attribution_status = "unattributed"
+            attributed_note = None
+        _log_incident(path, baseline_size, len(current), detail, False, status, snippet,
+                       attribution_status, attributed_note, detected_at)
         alert_msg = f"{path} shrank: {baseline_size}B -> {len(current)}B. {snippet}"
         if restore_enabled:
             alert_msg += " Queued for approval."
+        if attribution_status == "unattributed":
+            alert_msg += " UNATTRIBUTED — no matching COMMON_WRITE_LOG.md entry."
         send_hub_alert("regression_detected", "critical", alert_msg,
                         link=f"http://localhost:{db.get_setting('app.port', '8511')}")
     return "regression"
@@ -306,6 +412,7 @@ def _loop():
                 try:
                     scan_once()
                     check_hub_health()
+                    recheck_unattributed()
                 finally:
                     LOCK.release()
         except Exception:

@@ -13,7 +13,7 @@
 <section class="card">
   <h2>Pending restores — needs your approval</h2>
   <table>
-    <tr><th>When</th><th>Path</th><th>Baseline</th><th>Found</th><th>Diff</th><th></th></tr>
+    <tr><th>When</th><th>Path</th><th>Baseline</th><th>Found</th><th>Diff</th><th>Attribution</th><th></th></tr>
     {% for p in pending %}
     <tr>
       <td>{{ p.detected_at }}</td>
@@ -21,6 +21,11 @@
       <td>{{ p.baseline_size }}B</td>
       <td>{{ p.found_size }}B</td>
       <td>{{ p.diff_snippet }}</td>
+      <td>
+        {% if p.attribution_status == "attributed" %}<span class="attr-ok">&check; {{ p.attributed_note }}</span>
+        {% elif p.attribution_status == "unattributed" %}<span class="attr-bad">&#9888; UNATTRIBUTED</span>
+        {% else %}<span class="muted">&mdash;</span>{% endif %}
+      </td>
       <td style="white-space:nowrap">
         <form method="post" action="{{ url_for('approve_restore') }}" style="display:inline">
           <input type="hidden" name="incident_id" value="{{ p.id }}">
@@ -41,7 +46,7 @@
   <h2>Recent incidents</h2>
   {% if incidents %}
   <table>
-    <tr><th>When</th><th>Path</th><th>Baseline</th><th>Found</th><th>Status</th><th>Diff</th><th>Detail</th></tr>
+    <tr><th>When</th><th>Path</th><th>Baseline</th><th>Found</th><th>Status</th><th>Diff</th><th>Attribution</th><th>Detail</th></tr>
     {% for i in incidents %}
     <tr>
       <td>{{ i.detected_at }}</td>
@@ -50,6 +55,11 @@
       <td>{{ i.found_size }}B</td>
       <td>{{ i.status }}</td>
       <td>{{ i.diff_snippet or "" }}</td>
+      <td>
+        {% if i.attribution_status == "attributed" %}<span class="attr-ok">&check; {{ i.attributed_note }}</span>
+        {% elif i.attribution_status == "unattributed" %}<span class="attr-bad">&#9888; UNATTRIBUTED</span>
+        {% else %}<span class="muted">&mdash;</span>{% endif %}
+      </td>
       <td>{{ i.detail }}</td>
     </tr>
     {% endfor %}

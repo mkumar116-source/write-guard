@@ -5,7 +5,11 @@
   <form method="post">
     <label><input type="checkbox" name="enabled" {{ "checked" if settings.get("guard.enabled")=="1" }}> Guard enabled</label><br>
     <label><input type="checkbox" name="restore_enabled" {{ "checked" if settings.get("guard.restore_enabled")=="1" }}> Queue restores for my approval on regression (Phase 2 — a regression shows up under "Pending restores" with a diff snippet; nothing is written to the file until you click Approve)</label><br>
-    <label>Poll interval (seconds): <input type="number" name="poll_interval_seconds" value="{{ settings.get('guard.poll_interval_seconds') }}" min="5"></label><br><br>
+    <label>Poll interval (seconds): <input type="number" name="poll_interval_seconds" value="{{ settings.get('guard.poll_interval_seconds') }}" min="5"></label><br>
+    <label>Write-attribution match window (minutes): <input type="number" name="attribution_window_minutes" value="{{ settings.get('attribution.match_window_minutes') }}" min="1"></label>
+    <span class="muted">&mdash; how close a COMMON_WRITE_LOG.md row's timestamp must be to an incident to count as a match</span><br>
+    <label>Write-attribution recheck grace (minutes): <input type="number" name="attribution_grace_minutes" value="{{ settings.get('attribution.recheck_grace_minutes') }}" min="1"></label>
+    <span class="muted">&mdash; how long an unattributed incident keeps getting re-checked before it's final</span><br><br>
     <button type="submit">Save</button>
   </form>
 </section>

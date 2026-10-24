@@ -11,3 +11,5 @@ th, td { text-align:left; padding:6px 10px; border-bottom:1px solid #2a2a2a; fon
 button { background:#2a2a2a; color:#e6e6e6; border:1px solid #3a3a3a; border-radius:4px; padding:6px 12px; cursor:pointer; }
 button:hover { background:#333; }
 input[type=number] { background:#222; color:#e6e6e6; border:1px solid #3a3a3a; border-radius:4px; padding:4px; }
+.attr-ok { color:#7cc47c; }
+.attr-bad { color:#ff6b6b; font-weight:bold; }

@@ -49,6 +49,12 @@ def create_app():
             interval = request.form.get("poll_interval_seconds", "15").strip()
             if interval.isdigit() and int(interval) >= 5:
                 db.set_setting("guard.poll_interval_seconds", interval)
+            window = request.form.get("attribution_window_minutes", "2").strip()
+            if window.isdigit() and int(window) >= 1:
+                db.set_setting("attribution.match_window_minutes", window)
+            grace = request.form.get("attribution_grace_minutes", "5").strip()
+            if grace.isdigit() and int(grace) >= 1:
+                db.set_setting("attribution.recheck_grace_minutes", grace)
             return redirect(url_for("settings"))
         return render_template("settings.html", version=APP_VERSION, settings=db.all_settings(),
                                 tracked=guard.discover_files())

@@ -21,15 +21,17 @@ CREATE TABLE IF NOT EXISTS file_baselines (
 );
 
 CREATE TABLE IF NOT EXISTS revert_incidents (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    path          TEXT,
-    detected_at   TEXT DEFAULT (datetime('now', 'localtime')),
-    baseline_size INTEGER,
-    found_size    INTEGER,
-    restored      INTEGER NOT NULL DEFAULT 0,
-    detail        TEXT,
-    status        TEXT NOT NULL DEFAULT 'logged',
-    diff_snippet  TEXT
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    path               TEXT,
+    detected_at        TEXT DEFAULT (datetime('now', 'localtime')),
+    baseline_size      INTEGER,
+    found_size         INTEGER,
+    restored           INTEGER NOT NULL DEFAULT 0,
+    detail             TEXT,
+    status             TEXT NOT NULL DEFAULT 'logged',
+    diff_snippet       TEXT,
+    attribution_status TEXT,
+    attributed_note    TEXT
 );
 
 CREATE TABLE IF NOT EXISTS revert_pauses (
@@ -53,6 +55,14 @@ DEFAULT_SETTINGS = {
     "hub.enabled": "1",
     "hub.base_url": "http://localhost:8512",
     "hub.api_key": "",
+    # Write-attribution cross-check (added 2026-10-24, RVG-14 — after incident
+    # 14 had no matching COMMON_WRITE_LOG.md row). match_window_minutes is how
+    # close a log row's timestamp must be to detected_at to count as a match;
+    # recheck_grace_minutes is how long an 'unattributed' incident keeps
+    # getting re-checked (the log row is usually appended a little after the
+    # file write itself) before it's left as unattributed for good.
+    "attribution.match_window_minutes": "2",
+    "attribution.recheck_grace_minutes": "5",
 }
 
 
@@ -81,6 +91,9 @@ def init_db():
         for ddl in (
             "ALTER TABLE revert_incidents ADD COLUMN status TEXT NOT NULL DEFAULT 'logged'",
             "ALTER TABLE revert_incidents ADD COLUMN diff_snippet TEXT",
+            # RVG-14 (2026-10-24) — write-attribution cross-check columns
+            "ALTER TABLE revert_incidents ADD COLUMN attribution_status TEXT",
+            "ALTER TABLE revert_incidents ADD COLUMN attributed_note TEXT",
         ):
             try:
                 conn.execute(ddl)
