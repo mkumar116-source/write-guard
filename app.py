@@ -55,6 +55,9 @@ def create_app():
             grace = request.form.get("attribution_grace_minutes", "5").strip()
             if grace.isdigit() and int(grace) >= 1:
                 db.set_setting("attribution.recheck_grace_minutes", grace)
+            stability = request.form.get("baseline_stability_minutes", "3").strip()
+            if stability.isdigit() and int(stability) >= 1:
+                db.set_setting("baseline.stability_minutes", stability)
             return redirect(url_for("settings"))
         return render_template("settings.html", version=APP_VERSION, settings=db.all_settings(),
                                 tracked=guard.discover_files())

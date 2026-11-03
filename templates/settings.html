@@ -9,7 +9,9 @@
     <label>Write-attribution match window (minutes): <input type="number" name="attribution_window_minutes" value="{{ settings.get('attribution.match_window_minutes') }}" min="1"></label>
     <span class="muted">&mdash; how close a COMMON_WRITE_LOG.md row's timestamp must be to an incident to count as a match</span><br>
     <label>Write-attribution recheck grace (minutes): <input type="number" name="attribution_grace_minutes" value="{{ settings.get('attribution.recheck_grace_minutes') }}" min="1"></label>
-    <span class="muted">&mdash; how long an unattributed incident keeps getting re-checked before it's final</span><br><br>
+    <span class="muted">&mdash; how long an unattributed incident keeps getting re-checked before it's final</span><br>
+    <label>Baseline stability window (minutes): <input type="number" name="baseline_stability_minutes" value="{{ settings.get('baseline.stability_minutes') }}" min="1"></label>
+    <span class="muted">&mdash; how long a shrunk file must hold unchanged before it's quietly adopted as the new baseline (Phase 1 only)</span><br><br>
     <button type="submit">Save</button>
   </form>
 </section>

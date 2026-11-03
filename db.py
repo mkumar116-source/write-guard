@@ -63,6 +63,15 @@ DEFAULT_SETTINGS = {
     # file write itself) before it's left as unattributed for good.
     "attribution.match_window_minutes": "2",
     "attribution.recheck_grace_minutes": "5",
+    # Baseline recovery (added 2026-11-02, RVG-15 — after the ChatQA Hub
+    # investigation found the baseline never lowers, so one legitimate shrink
+    # (an archive rotation, or anything else) gets re-flagged as "still
+    # regressed" on every subsequent poll forever, compounding one real event
+    # into dozens of incidents). stability_minutes: how long a shrunk file's
+    # size must hold unchanged, with no new anomaly, before Write Guard
+    # quietly adopts it as the new baseline (Phase 1 / status='logged' only —
+    # never overrides a pending_approval incident awaiting Kumar's click).
+    "baseline.stability_minutes": "3",
 }
 
 

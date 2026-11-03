@@ -29,6 +29,21 @@ cross-checked against common/COMMON_WRITE_LOG.md (see PROJECT_SETUP_TEMPLATE
 §23) for a row on the same file within a few minutes of detection. A match
 means a legitimate, logged edit; no match is the stronger "unattributed"
 signal. See _find_attribution() / recheck_unattributed() below.
+
+Baseline recovery (added 2026-11-02, RVG-15 — after the ChatQA Hub
+investigation found the baseline is a one-way high-water mark that never
+lowers, so one legitimate shrink — an archive rotation, or anything else —
+re-flags as "still regressed" on every poll forever, compounding a single
+real event into dozens of incidents as the file keeps growing again below
+its old peak). Two paths lower the baseline back down, both Phase-1-only
+(status='logged' — never overrides a pending_approval incident awaiting
+Kumar's click): (1) the moment a regression is marked attributed, baseline
+resets to current content; (2) if a shrunk size holds stable for
+baseline.stability_minutes with no further change, Write Guard quietly
+adopts it as the new baseline even if never attributed (covers
+COMMON_WRITE_LOG.md's case — chats rarely log a write to the log file
+about itself, so attribution alone doesn't catch its own noise). The
+original incident row is never deleted, just annotated.
 """
 import os
 import threading
@@ -128,9 +143,9 @@ def _set_baseline(path, content):
                "updated_at=excluded.updated_at", (path, content, len(content), _now_ist()))
 
 
-def _last_incident_found_size(path):
-    rows = db.query("SELECT found_size FROM revert_incidents WHERE path=? ORDER BY id DESC LIMIT 1", (path,))
-    return rows[0]["found_size"] if rows else None
+def _last_incident(path):
+    rows = db.query("SELECT * FROM revert_incidents WHERE path=? ORDER BY id DESC LIMIT 1", (path,))
+    return rows[0] if rows else None
 
 
 def _diff_snippet(baseline, current, max_len=80):
@@ -237,6 +252,14 @@ def recheck_unattributed():
             note = f"{match['tool_chat']} — {match['note']}" if match["note"] else match["tool_chat"]
             db.execute("UPDATE revert_incidents SET attribution_status='attributed', attributed_note=? "
                        "WHERE id=?", (note, inc["id"]))
+            # RVG-15: same as the immediate-attribution case in check_one() —
+            # now explained, so stop comparing against the stale baseline.
+            # Phase-1 only. Re-read fresh rather than trusting found_size,
+            # since more time has passed and the file may have moved again.
+            if inc["status"] == "logged":
+                current = _read(inc["path"])
+                if current is not None:
+                    _set_baseline(inc["path"], current)
 
 
 # --- Smart Alerting Hub integration (added 2026-10-17) -----------------------
@@ -324,7 +347,8 @@ def check_one(path, restore_enabled):
     # falsely trip a prefix check even though nothing was lost. Only
     # CHANGE_LOG.md is strictly append-only by convention; shrink alone is
     # still the one safe, file-type-agnostic signal a revert actually gives.)
-    last_found = _last_incident_found_size(path)
+    last_incident = _last_incident(path)
+    last_found = last_incident["found_size"] if last_incident else None
     if last_found != len(current):   # only log a NEW distinct bad state, not a repeat poll of the same one
         detail = f"baseline {baseline_size}B -> found {len(current)}B"
         snippet = _diff_snippet(baseline, current)
@@ -344,6 +368,12 @@ def check_one(path, restore_enabled):
             attributed_note = None
         _log_incident(path, baseline_size, len(current), detail, False, status, snippet,
                        attribution_status, attributed_note, detected_at)
+        # RVG-15: an attributed regression is a known, explained edit — the
+        # shrunk content IS the new legitimate state, so stop comparing
+        # against the old baseline. Phase-1 only; never short-circuits a
+        # pending_approval incident Kumar still needs to act on.
+        if attribution_status == "attributed" and status == "logged":
+            _set_baseline(path, current)
         alert_msg = f"{path} shrank: {baseline_size}B -> {len(current)}B. {snippet}"
         if restore_enabled:
             alert_msg += " Queued for approval."
@@ -351,6 +381,24 @@ def check_one(path, restore_enabled):
             alert_msg += " UNATTRIBUTED — no matching COMMON_WRITE_LOG.md entry."
         send_hub_alert("regression_detected", "critical", alert_msg,
                         link=f"http://localhost:{db.get_setting('app.port', '8511')}")
+    elif last_incident and last_incident["status"] == "logged":
+        # RVG-15: same bad state as the last logged incident (no new row —
+        # that's the existing dedup above). If it's held unchanged for a
+        # while with nothing new going wrong, treat it as the new normal
+        # instead of re-flagging it against the stale baseline forever —
+        # covers cases attribution never catches (e.g. a chat rarely logs a
+        # write to COMMON_WRITE_LOG.md about itself writing COMMON_WRITE_LOG.md).
+        try:
+            last_dt = datetime.strptime(last_incident["detected_at"], "%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError):
+            last_dt = None
+        stability_minutes = int(db.get_setting("baseline.stability_minutes", "3") or 3)
+        if last_dt and (datetime.now() - last_dt).total_seconds() >= stability_minutes * 60:
+            _set_baseline(path, current)
+            db.execute(
+                "UPDATE revert_incidents SET detail = detail || ? WHERE id = ?",
+                (f" — baseline auto-reset after holding stable {stability_minutes}+ min", last_incident["id"]),
+            )
     return "regression"
 
 
