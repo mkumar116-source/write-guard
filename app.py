@@ -2,22 +2,109 @@
 
 Phase 1: monitor-only file-revert watcher for every Flask tool's
 CHANGE_LOG/BACKLOG/HANDOVER files plus the shared common/ files.
-See guard.py for the detection logic.
+See guard.py for the detection logic. See auth.py for the single-admin
+login added 2026-11-07 (SECA F71).
 """
 import os
-import sys
+import secrets
 
-from flask import Flask, render_template, request, redirect, url_for
+from flask import Flask, render_template, request, redirect, url_for, session
 
+import auth
 import db
 import guard
 
 APP_VERSION = "0.1.0"
 
+# Routes reachable with no login — everything else is fail-closed (anything
+# not explicitly listed here requires a session), so a newly-added route is
+# protected by default. /health stays open since other tools' watchdogs poll it.
+OPEN_PATHS = {"/login", "/setup", "/health"}
+
 
 def create_app():
     app = Flask(__name__)
     db.init_db()
+
+    # Session secret: generated once and stored alongside everything else in
+    # the settings table (same spot as auth.password_hash / hub.api_key) —
+    # not hardcoded in source, not reset on every restart.
+    secret = db.get_setting("auth.secret_key")
+    if not secret:
+        secret = secrets.token_hex(32)
+        db.set_setting("auth.secret_key", secret)
+    app.secret_key = secret
+
+    @app.before_request
+    def require_login():
+        if request.path in OPEN_PATHS or request.path.startswith("/static/"):
+            return None
+        if not auth.is_set_up():
+            return redirect(url_for("setup"))
+        if not session.get("logged_in"):
+            return redirect(url_for("login", next=request.path))
+        return None
+
+    @app.after_request
+    def add_security_headers(response):
+        # SECA F396/F397 (2026-11-07): baseline security headers + hide the
+        # Werkzeug version from the Server header, same pattern applied to
+        # netmonitor. CSP is kept loose (unsafe-inline for style/script)
+        # since the dashboard templates use inline style, no nonce setup.
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "same-origin"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "script-src 'self' 'unsafe-inline'"
+        )
+        response.headers["Server"] = "Write Guard"
+        return response
+
+    @app.route("/setup", methods=["GET", "POST"])
+    def setup():
+        if auth.is_set_up():
+            return redirect(url_for("login"))
+        error = None
+        if request.method == "POST":
+            password = request.form.get("password", "")
+            confirm = request.form.get("confirm", "")
+            if len(password) < 8:
+                error = "Password must be at least 8 characters."
+            elif password != confirm:
+                error = "Passwords don't match."
+            else:
+                auth.set_password(password)
+                session["logged_in"] = True
+                return redirect(url_for("dashboard"))
+        return render_template("setup.html", version=APP_VERSION, error=error)
+
+    @app.route("/login", methods=["GET", "POST"])
+    def login():
+        if not auth.is_set_up():
+            return redirect(url_for("setup"))
+        error = None
+        if request.method == "POST":
+            until = auth.locked_until()
+            if until:
+                error = f"Too many failed attempts — locked until {until.strftime('%H:%M:%S')}."
+            elif auth.verify_password(request.form.get("password", "")):
+                auth.clear_failed_logins()
+                session["logged_in"] = True
+                next_path = request.args.get("next") or url_for("dashboard")
+                return redirect(next_path)
+            else:
+                locked_now = auth.record_failed_login()
+                error = (
+                    f"Too many failed attempts — locked for {auth.LOCKOUT_MINUTES} minutes."
+                    if locked_now else "Incorrect password."
+                )
+        return render_template("login.html", version=APP_VERSION, error=error)
+
+    @app.route("/logout", methods=["POST"])
+    def logout():
+        session.clear()
+        return redirect(url_for("login"))
 
     @app.route("/")
     def dashboard():
@@ -25,6 +112,22 @@ def create_app():
         pending = db.query("SELECT * FROM revert_incidents WHERE status='pending_approval' ORDER BY id DESC")
         baselines = db.query("SELECT path, size, updated_at FROM file_baselines ORDER BY path")
         pauses = db.query("SELECT path, paused_until FROM revert_pauses")
+        hub_queue_count = db.query("SELECT COUNT(*) AS c FROM pending_hub_alerts")[0]["c"]
+
+        # Attribution-rate stat (2026-11-07) — simple, no new storage: % of
+        # the last N real-file incidents (excludes sentinel rows like
+        # "(Systemic)"/"(Smart Alerting Hub)" and pre-RVG-14 rows with no
+        # attribution_status at all) that came back attributed.
+        attr_rows = db.query(
+            "SELECT attribution_status FROM revert_incidents "
+            "WHERE path NOT IN ('(Systemic)', '(Smart Alerting Hub)') "
+            "AND attribution_status IS NOT NULL ORDER BY id DESC LIMIT 50"
+        )
+        attribution_rate = None
+        if attr_rows:
+            attributed = sum(1 for r in attr_rows if r["attribution_status"] == "attributed")
+            attribution_rate = {"pct": round(100 * attributed / len(attr_rows)), "n": len(attr_rows)}
+
         return render_template(
             "dashboard.html",
             version=APP_VERSION,
@@ -34,6 +137,8 @@ def create_app():
             baselines=baselines,
             pauses={p["path"]: p["paused_until"] for p in pauses},
             tracked_count=len(guard.discover_files()),
+            hub_queue_count=hub_queue_count,
+            attribution_rate=attribution_rate,
         )
 
     @app.route("/scan-now", methods=["POST"])

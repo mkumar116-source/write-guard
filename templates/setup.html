@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Write Guard — Set up admin password</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<main class="auth-page">
+<section class="card">
+  <h2>Write Guard <small>v{{ version }}</small></h2>
+  <p class="muted">First run — set an admin password (at least 8 characters).</p>
+  {% if error %}<p class="attr-bad">{{ error }}</p>{% endif %}
+  <form method="post">
+    <label>Password: <input type="password" name="password" autofocus></label><br>
+    <label>Confirm: <input type="password" name="confirm"></label><br><br>
+    <button type="submit">Set password</button>
+  </form>
+</section>
+</main>
+</body>
+</html>

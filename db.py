@@ -38,6 +38,38 @@ CREATE TABLE IF NOT EXISTS revert_pauses (
     path        TEXT PRIMARY KEY,
     paused_until TEXT NOT NULL
 );
+
+-- SECA F71 (2026-11-07): single-admin login lockout. One row (id=1) since
+-- this is a one-person tool, not a users table — the password hash itself
+-- lives in settings ('auth.password_hash') alongside everything else.
+CREATE TABLE IF NOT EXISTS login_failures (
+    id           INTEGER PRIMARY KEY CHECK (id = 1),
+    failed_count INTEGER NOT NULL DEFAULT 0,
+    locked_until TEXT
+);
+
+-- RVG-7 (2026-11-07): retry queue for failed Smart Alerting Hub POSTs —
+-- previously dropped outright. A row sits here until it's delivered or
+-- gives up after hub.alert_give_up_hours.
+CREATE TABLE IF NOT EXISTS pending_hub_alerts (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    alert_key  TEXT,
+    severity   TEXT,
+    message    TEXT,
+    link       TEXT,
+    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+    attempts   INTEGER NOT NULL DEFAULT 0
+);
+
+-- Alert digest (2026-11-07): holds regression alerts that arrived while a
+-- digest window was already open, so they go out as one merged message
+-- instead of one hub POST each. See guard.queue_regression_alert().
+CREATE TABLE IF NOT EXISTS digest_queue (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    path       TEXT,
+    message    TEXT,
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
 """
 
 DEFAULT_SETTINGS = {
@@ -72,6 +104,24 @@ DEFAULT_SETTINGS = {
     # quietly adopts it as the new baseline (Phase 1 / status='logged' only —
     # never overrides a pending_approval incident awaiting Kumar's click).
     "baseline.stability_minutes": "3",
+    # RVG-7 (2026-11-07) — hub alert retry queue. A queued alert gets this
+    # many hours before Write Guard gives up and logs a dashboard incident
+    # instead of retrying forever (matches general webhook-retry practice —
+    # give up on elapsed time, not a fixed attempt count).
+    "hub.alert_give_up_hours": "2",
+    # Alert digest (2026-11-07) — timestamp the current digest window opened,
+    # or empty if none is open. A lone regression alert always sends right
+    # away; a 2nd+ one within digest.window_minutes of the first is held and
+    # merged into one follow-up alert when the window closes.
+    "digest.window_opened_at": "",
+    "digest.window_minutes": "2",
+    # Cross-file correlation (2026-11-07) — N or more distinct files
+    # regressing within this many minutes is raised as one higher-severity
+    # "systemic" incident (sentinel path "(Systemic)") on top of the normal
+    # per-file incidents, since that's a stronger "one shared cause" signal
+    # than coincidence.
+    "systemic.window_minutes": "2",
+    "systemic.min_files": "2",
 }
 
 

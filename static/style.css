@@ -10,6 +10,11 @@ th, td { text-align:left; padding:6px 10px; border-bottom:1px solid #2a2a2a; fon
 .muted { color:#888; }
 button { background:#2a2a2a; color:#e6e6e6; border:1px solid #3a3a3a; border-radius:4px; padding:6px 12px; cursor:pointer; }
 button:hover { background:#333; }
-input[type=number] { background:#222; color:#e6e6e6; border:1px solid #3a3a3a; border-radius:4px; padding:4px; }
+input[type=number], input[type=password] { background:#222; color:#e6e6e6; border:1px solid #3a3a3a; border-radius:4px; padding:4px; }
 .attr-ok { color:#7cc47c; }
 .attr-bad { color:#ff6b6b; font-weight:bold; }
+.link-button { background:none; border:none; color:#8ab4f8; padding:0; cursor:pointer; font-size:1em; }
+.link-button:hover { text-decoration:underline; background:none; }
+.auth-page { display:flex; justify-content:center; align-items:center; min-height:100vh; }
+.auth-page .card { width:320px; }
+.systemic-banner { border-color:#ff6b6b; background:#2a1414; }

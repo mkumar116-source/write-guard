@@ -11,6 +11,9 @@
   <nav>
     <a href="{{ url_for('dashboard') }}">Dashboard</a>
     <a href="{{ url_for('settings') }}">Settings</a>
+    <form method="post" action="{{ url_for('logout') }}" style="display:inline">
+      <button type="submit" class="link-button">Logout</button>
+    </form>
   </nav>
 </header>
 <main>

@@ -1,11 +1,23 @@
 {% extends "base.html" %}
 {% block content %}
+{% set systemic = incidents | selectattr("path", "equalto", "(Systemic)") | list | first %}
+{% if systemic %}
+<section class="card systemic-banner">
+  <strong>&#9888; SYSTEMIC — {{ systemic.detail }}</strong>
+  <span class="muted">(detected {{ systemic.detected_at }})</span>
+</section>
+{% endif %}
+
 <section class="card">
   <h2>Status</h2>
   <p>Guard: <strong>{{ "ON" if settings.get("guard.enabled") == "1" else "OFF" }}</strong>
      &middot; Restore: <strong>{{ "APPROVAL-GATED" if settings.get("guard.restore_enabled") == "1" else "MONITOR-ONLY" }}</strong>
      &middot; Watching <strong>{{ tracked_count }}</strong> files
      &middot; Poll every {{ settings.get("guard.poll_interval_seconds") }}s</p>
+  <p>
+    {% if attribution_rate %}Attribution: <strong>{{ attribution_rate.pct }}%</strong> attributed (last {{ attribution_rate.n }}) &middot; {% endif %}
+    Hub queue: <strong>{{ hub_queue_count }}</strong> pending
+  </p>
   <form method="post" action="{{ url_for('scan_now') }}"><button type="submit">Scan now</button></form>
 </section>
 

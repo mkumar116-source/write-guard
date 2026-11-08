@@ -44,6 +44,32 @@ adopts it as the new baseline even if never attributed (covers
 COMMON_WRITE_LOG.md's case — chats rarely log a write to the log file
 about itself, so attribution alone doesn't catch its own noise). The
 original incident row is never deleted, just annotated.
+
+RVG-7 hub alert retry queue (added 2026-11-07): a failed hub POST used to
+just be dropped. Now it's queued (pending_hub_alerts) and retried each poll
+— except while check_hub_health() has the hub marked down (hub.was_down=1),
+since there's no point burning a request every 15s on a confirmed outage;
+the queue just holds everything until it's back. A queued alert gets
+hub.alert_give_up_hours (default 2) before Write Guard gives up and logs a
+dashboard incident instead of retrying forever. See send_hub_alert() /
+process_hub_alert_queue().
+
+Alert digest (added 2026-11-07): a lone regression alert still pages
+immediately. If a 2nd+ regression lands within digest.window_minutes
+(default 2) of the first, it's held (digest_queue) and merged into one
+follow-up alert when the window closes, instead of one hub POST per
+incident. See queue_regression_alert() / flush_digest_if_due().
+
+Cross-file correlation (added 2026-11-07): if systemic.min_files (default
+2) or more DISTINCT files regress within systemic.window_minutes (default
+2), that's raised as one higher-severity incident (sentinel path
+"(Systemic)") on top of the normal per-file ones — a stronger "one shared
+cause" signal than N independent incidents. See check_systemic_correlation().
+
+Write Guard watches its own RVG_CHANGE_LOG.md/RVG_BACKLOG.md/RVG_HANDOVER.md
+too as of 2026-11-07 (RVG-17) — discover_files() used to skip its own
+folder entirely; there was no real hazard in tracking them like any other
+tool's files.
 """
 import os
 import threading
@@ -54,7 +80,6 @@ import requests
 
 import db
 
-SELF_DIR = os.path.dirname(os.path.abspath(__file__))
 LOCK = threading.Lock()
 
 TRACKED_SUFFIXES = ("_CHANGE_LOG.md", "_BACKLOG.md", "_HANDOVER.md")
@@ -78,8 +103,12 @@ def discover_files():
             depth = os.path.relpath(dirpath, root).count(os.sep)
             if depth >= 2:
                 dirnames[:] = []
-            if os.path.abspath(dirpath) == os.path.abspath(SELF_DIR):
-                continue  # never watch our own tool's files
+            # RVG-17 (2026-11-07): used to skip write-guard's own folder
+            # entirely here — "never watch our own tool's files". There's no
+            # actual hazard in tracking RVG_CHANGE_LOG.md etc. the same as
+            # every other tool (Phase 1 never writes back; Phase 2 only
+            # writes the file it detected a regression on), so that
+            # exclusion is gone — Write Guard now watches itself too.
             for name in filenames:
                 if name.endswith(TRACKED_SUFFIXES) or name in CLASSIC_NAMES:
                     found.append(os.path.join(dirpath, name))
@@ -264,11 +293,8 @@ def recheck_unattributed():
 
 # --- Smart Alerting Hub integration (added 2026-10-17) -----------------------
 
-def send_hub_alert(alert_key, severity, message, link=None):
-    """Best-effort POST to the Smart Alerting Hub. Never raises — a hub
-    outage must not break scanning. Returns True on a 2xx response."""
-    if db.get_setting("hub.enabled", "1") != "1":
-        return False
+def _post_hub_alert(alert_key, severity, message, link=None):
+    """The actual POST, no queueing. Never raises. Returns True on 2xx."""
     base_url = db.get_setting("hub.base_url", "http://localhost:8512")
     api_key = db.get_setting("hub.api_key", "")
     if not api_key:
@@ -289,7 +315,166 @@ def send_hub_alert(alert_key, severity, message, link=None):
         )
         return resp.ok
     except requests.RequestException:
-        return False  # hub unreachable — dropped, not queued (RVG-7, backlogged)
+        return False
+
+
+def _enqueue_hub_alert(alert_key, severity, message, link=None):
+    db.execute(
+        "INSERT INTO pending_hub_alerts (alert_key, severity, message, link, created_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (alert_key[:100], severity, message[:2000], link, _now_ist()),
+    )
+
+
+def send_hub_alert(alert_key, severity, message, link=None):
+    """Best-effort POST to the Smart Alerting Hub. Never raises — a hub
+    outage must not break scanning. Returns True on a 2xx response. On
+    failure the alert is queued for retry (RVG-7, 2026-11-07) instead of
+    being dropped outright — see process_hub_alert_queue()."""
+    if db.get_setting("hub.enabled", "1") != "1":
+        return False
+    ok = _post_hub_alert(alert_key, severity, message, link)
+    if not ok:
+        _enqueue_hub_alert(alert_key, severity, message, link)
+    return ok
+
+
+def process_hub_alert_queue():
+    """Drains pending_hub_alerts (RVG-7). Skipped entirely while the hub is
+    known down (hub.was_down=1) — no point burning a request every poll on
+    a confirmed outage; the queue just holds everything until check_hub_
+    health() sees it come back. Each queued alert gets hub.alert_give_up_
+    hours before Write Guard gives up on it and logs a dashboard incident
+    instead of retrying forever (elapsed-time give-up, not attempt-count —
+    matches general webhook-retry practice)."""
+    if db.get_setting("hub.enabled", "1") != "1":
+        return
+    if db.get_setting("hub.was_down", "0") == "1":
+        return
+    give_up_hours = float(db.get_setting("hub.alert_give_up_hours", "2") or 2)
+    now = datetime.now()
+    for row in db.query("SELECT * FROM pending_hub_alerts ORDER BY id"):
+        try:
+            created_dt = datetime.strptime(row["created_at"], "%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError):
+            created_dt = now  # malformed row — don't let it jam the queue forever
+        if _post_hub_alert(row["alert_key"], row["severity"], row["message"], row["link"]):
+            db.execute("DELETE FROM pending_hub_alerts WHERE id=?", (row["id"],))
+            continue
+        if (now - created_dt).total_seconds() > give_up_hours * 3600:
+            db.execute("DELETE FROM pending_hub_alerts WHERE id=?", (row["id"],))
+            _log_incident(
+                "(Smart Alerting Hub)", 0, 0,
+                f"Gave up delivering a queued alert after {give_up_hours}h — "
+                f"hub never came back in time. Original message: {row['message'][:300]}",
+                False, "logged", None,
+            )
+        else:
+            db.execute("UPDATE pending_hub_alerts SET attempts = attempts + 1 WHERE id=?", (row["id"],))
+
+
+# --- Alert digest (added 2026-11-07) ------------------------------------------
+
+def _digest_window_open():
+    opened = db.get_setting("digest.window_opened_at", "")
+    if not opened:
+        return False
+    try:
+        opened_dt = datetime.strptime(opened, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return False
+    window_minutes = int(db.get_setting("digest.window_minutes", "2") or 2)
+    return (datetime.now() - opened_dt).total_seconds() < window_minutes * 60
+
+
+def queue_regression_alert(path, message):
+    """A lone regression alerts immediately, same as always. If a 2nd+
+    regression lands within digest.window_minutes of the first, it's held
+    here and merged into one follow-up alert when the window closes
+    (flush_digest_if_due()) instead of one hub POST per incident."""
+    if _digest_window_open():
+        db.execute("INSERT INTO digest_queue (path, message, created_at) VALUES (?, ?, ?)",
+                   (path, message, _now_ist()))
+    else:
+        db.set_setting("digest.window_opened_at", _now_ist())
+        send_hub_alert("regression_detected", "critical", message,
+                        link=f"http://localhost:{db.get_setting('app.port', '8511')}")
+
+
+def flush_digest_if_due():
+    """Called every poll. Once digest.window_minutes has elapsed since the
+    window opened, sends everything held in digest_queue as one merged
+    alert (only if anything's actually queued — a lone incident leaves the
+    queue empty and this closes the window quietly) and reopens on the next
+    regression."""
+    opened = db.get_setting("digest.window_opened_at", "")
+    if not opened:
+        return
+    try:
+        opened_dt = datetime.strptime(opened, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        db.set_setting("digest.window_opened_at", "")
+        return
+    window_minutes = int(db.get_setting("digest.window_minutes", "2") or 2)
+    if (datetime.now() - opened_dt).total_seconds() < window_minutes * 60:
+        return  # window still open
+    rows = db.query("SELECT * FROM digest_queue ORDER BY id")
+    if rows:
+        lines = [f"- {r['path']}: {r['message']}" for r in rows]
+        summary = f"{len(rows)} more regression(s) within {window_minutes} min:\n" + "\n".join(lines)
+        send_hub_alert("regression_digest", "critical", summary,
+                        link=f"http://localhost:{db.get_setting('app.port', '8511')}")
+        db.execute("DELETE FROM digest_queue")
+    db.set_setting("digest.window_opened_at", "")
+
+
+# --- Cross-file correlation (added 2026-11-07) --------------------------------
+
+SENTINEL_PATHS = ("(Systemic)", "(Smart Alerting Hub)")
+
+
+def check_systemic_correlation():
+    """If systemic.min_files or more DISTINCT files regressed within
+    systemic.window_minutes, that's a stronger "something systemic
+    happened" signal (a bad sync, a bulk overwrite) than N independent
+    incidents — likely one shared cause rather than coincidence. Raises ONE
+    summary incident (sentinel path "(Systemic)"), extended in place while
+    more files join the same ongoing burst rather than one new row per
+    file, on top of — not instead of — the normal per-file incident rows."""
+    window_minutes = int(db.get_setting("systemic.window_minutes", "2") or 2)
+    min_files = int(db.get_setting("systemic.min_files", "2") or 2)
+    now = datetime.now()
+    window_start = now - timedelta(minutes=window_minutes)
+    recent_paths = set()
+    for row in db.query("SELECT path, detected_at FROM revert_incidents ORDER BY id DESC LIMIT 100"):
+        if row["path"] in SENTINEL_PATHS:
+            continue
+        try:
+            dt = datetime.strptime(row["detected_at"], "%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError):
+            continue
+        if dt < window_start:
+            break  # rows are newest-first; nothing older matters
+        recent_paths.add(row["path"])
+    if len(recent_paths) < min_files:
+        return
+
+    detail = (f"{len(recent_paths)} distinct files regressed within {window_minutes} min: "
+              + ", ".join(sorted(recent_paths)))
+    existing = db.query("SELECT * FROM revert_incidents WHERE path='(Systemic)' ORDER BY id DESC LIMIT 1")
+    if existing:
+        try:
+            last_dt = datetime.strptime(existing[0]["detected_at"], "%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError):
+            last_dt = None
+        if last_dt and last_dt >= window_start:
+            # still the same ongoing burst — extend it in place, don't spam a new row per file
+            db.execute("UPDATE revert_incidents SET detail=?, found_size=? WHERE id=?",
+                       (detail, len(recent_paths), existing[0]["id"]))
+            return
+    _log_incident("(Systemic)", 0, len(recent_paths), detail, False, "logged", None)
+    send_hub_alert("systemic_regression", "critical", f"SYSTEMIC: {detail}",
+                    link=f"http://localhost:{db.get_setting('app.port', '8511')}")
 
 
 def check_hub_health():
@@ -379,8 +564,8 @@ def check_one(path, restore_enabled):
             alert_msg += " Queued for approval."
         if attribution_status == "unattributed":
             alert_msg += " UNATTRIBUTED — no matching COMMON_WRITE_LOG.md entry."
-        send_hub_alert("regression_detected", "critical", alert_msg,
-                        link=f"http://localhost:{db.get_setting('app.port', '8511')}")
+        queue_regression_alert(path, alert_msg)
+        check_systemic_correlation()
     elif last_incident and last_incident["status"] == "logged":
         # RVG-15: same bad state as the last logged incident (no new row —
         # that's the existing dedup above). If it's held unchanged for a
@@ -461,6 +646,8 @@ def _loop():
                     scan_once()
                     check_hub_health()
                     recheck_unattributed()
+                    process_hub_alert_queue()
+                    flush_digest_if_due()
                 finally:
                     LOCK.release()
         except Exception:

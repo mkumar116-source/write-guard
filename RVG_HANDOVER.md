@@ -45,6 +45,29 @@ keeps a baseline per file and flags/logs any regression.
   size that's held stable for `baseline.stability_minutes` (default 3 min)
   even without attribution, covering files like `COMMON_WRITE_LOG.md` that
   rarely get a matching log row about writing to themselves.
+- **Security hardening** (RVG-16, 2026-11-07, from SECA findings F71/F348/
+  F72/F73/F315/F396/F397): single-admin session login — no users table,
+  just a password hash in `settings`, `/setup` on first run, session +
+  5-fail/5-min lockout (same shape as SECA/netmonitor). Fail-closed
+  `before_request` allowlist means any new route is login-protected by
+  default. Also added CSP/X-Frame-Options/nosniff/Referrer-Policy headers,
+  hid the Werkzeug version from the `Server` header, pinned
+  `requirements.txt`, dropped an unused import. **First restart after this
+  lands on `/setup`** to create the admin password.
+- **Self-tracking + alerting refinements** (RVG-17/18/19/20, 2026-11-07):
+  Write Guard now watches its own `RVG_CHANGE_LOG.md`/`RVG_BACKLOG.md`/
+  `RVG_HANDOVER.md` too (RVG-17 — the old "never watch our own files"
+  exclusion had no real reason behind it). Alert digest (RVG-18): a lone
+  regression still pages immediately; a 2nd+ regression within
+  `digest.window_minutes` (default 2) is held and merged into one
+  follow-up alert instead of one hub POST per incident. Cross-file
+  correlation (RVG-19): 2+ distinct files regressing within
+  `systemic.window_minutes` (default 2) raises one higher-severity
+  "systemic" incident (sentinel path `(Systemic)`, red dashboard banner)
+  on top of the normal per-file ones — a stronger "one shared cause"
+  signal than coincidence. Attribution-rate stat (RVG-20): dashboard now
+  shows "X% attributed (last N)" and a hub-queue pending count, both
+  computed on page load, no new storage.
 
 ## Key decisions
 
@@ -65,19 +88,32 @@ keeps a baseline per file and flags/logs any regression.
   — it never short-circuits a `pending_approval` incident Kumar still needs
   to Approve/Reject, so Phase 2's approval gate stays meaningful if it's
   ever turned on.
+- RVG-7's retry queue and the digest (RVG-18) both skip/hold while things
+  are in flight, but neither ever drops an alert silently — a queued alert
+  either delivers, gets merged into a digest, or (RVG-7 only) gives up
+  after `hub.alert_give_up_hours` and becomes its own dashboard incident.
+- Cross-file correlation (RVG-19) extends one sentinel `(Systemic)` row in
+  place for an ongoing burst rather than inserting a new row per file, to
+  avoid flooding the incident table when several files regress together.
 
 ## Open issues
 
-- **RVG-7**: Retry queue for hub alerts — a failed POST to the hub is
-  currently dropped, not queued/retried. Deliberate v1 tradeoff since Write
-  Guard's own dashboard/incident log is the backstop either way.
 - Already-stuck baselines from before RVG-15 existed (e.g.
   `NETMON_CHANGE_LOG.md`, frozen since 2026-10-21) won't self-heal until a
   new attribution or stability-window trigger fires — a one-time manual
   reset of those was offered but not yet done, pending Kumar's go-ahead.
+- **F348** (write_guard.db world-readable) only partly closed — the icacls
+  lockdown script (`scripts\seca_fix_write_guard_db_permissions.bat`) is
+  written but not run; needs Kumar to run it once from an elevated prompt.
+- **RVG-21** (held, not built): Approve/Reject link directly in hub alert
+  messages — no functional value while Phase 2 (`restore_enabled`) is off.
 
 ## Next step
 
-Keep Phase 1 running and watch the incident log for a clean stretch before
-considering Phase 2 (`restore_enabled=1`) — the RVG-15 fix should make that
-log much quieter going forward. RVG-7 is the one open backlog item.
+Restart the app so RVG-16's login and RVG-17/18/19/20's self-tracking/
+alerting changes take effect — first launch after restart goes to `/setup`
+to create the admin password. Then run
+`scripts\seca_fix_write_guard_db_permissions.bat` elevated to close out
+F348. After that, keep Phase 1 running and watch the incident log for a
+clean stretch (now with digest/systemic noise reduction too) before
+considering Phase 2 (`restore_enabled=1`).
